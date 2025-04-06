@@ -1,0 +1,322 @@
+# -*- coding: utf-8 -*-
+"""
+加密货币价格预测完整代码
+包含数据预处理、特征工程、模型训练与评估、可视化分析全流程
+"""
+
+# 1. 导入必要的库
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from sklearn.tree import DecisionTreeClassifier
+from xgboost import XGBClassifier
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.utils.class_weight import compute_class_weight
+from imblearn.combine import SMOTETomek
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 设置中文字体显示
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 2. 数据加载与预处理
+def load_and_preprocess_data(filepath):
+    """加载数据并进行预处理"""
+    # 读取数据
+    df = pd.read_csv(filepath)
+    
+    # 选择特征列
+    features = ['Price', 'Volume (24h)', 'Market Cap', 'Num Market Pairs', 
+               '1h %', '24h %', '7d %', '60d %', '90d %']
+    
+    # 创建二分类标签（上涨/下跌）
+    df['Price_Direction'] = np.where(df['24h %'] > 0, 1, 0)
+    
+    # 创建四分类标签
+    def create_price_labels(price_change):
+        if price_change <= -5: return 0  # 大跌
+        elif -5 < price_change <= 0: return 1  # 小跌
+        elif 0 < price_change <= 5: return 2  # 小涨
+        else: return 3  # 大涨
+    df['Price_Category'] = df['24h %'].apply(create_price_labels)
+    
+    return df, features
+
+# 3. 数据分割与标准化
+def split_and_scale_data(df, features):
+    """数据分割与标准化处理"""
+    X = df[features]
+    y = df['Price_Direction']
+    y_multi = df['Price_Category']
+    
+    # 二分类数据分割
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42)
+    
+    # 四分类数据分割
+    X_train_multi, X_test_multi, y_train_multi, y_test_multi = train_test_split(
+        X, y_multi, test_size=0.2, random_state=42)
+    
+    # 数据标准化
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    
+    return (X_train, X_test, y_train, y_test, 
+            X_train_multi, X_test_multi, y_train_multi, y_test_multi,
+            X_train_scaled, X_test_scaled)
+
+# 4. 模型训练与评估
+def train_and_evaluate_models(X_train, X_test, y_train, y_test, scaled=False):
+    """训练并评估多个分类模型"""
+    models = {
+        'SVM': SVC(kernel='rbf', probability=True, random_state=42),
+        '决策树': DecisionTreeClassifier(random_state=42),
+        'XGBoost': XGBClassifier(random_state=42),
+        '随机森林': RandomForestClassifier(random_state=42)
+    }
+    
+    predictions = {}
+    for name, model in models.items():
+        # SVM需要标准化数据
+        if name == 'SVM' and scaled:
+            model.fit(X_train_scaled, y_train)
+            y_pred = model.predict(X_test_scaled)
+        else:
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+        predictions[name] = y_pred
+        
+        print(f"\n{name}模型评估报告：")
+        print(classification_report(y_test, y_pred))
+        
+    return models, predictions
+
+# 5. 可视化工具函数
+def plot_confusion_matrix(y_true, y_pred, title, multi_class=False):
+    """绘制混淆矩阵"""
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6) if multi_class else (6, 4))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.title(title)
+    plt.ylabel('真实值')
+    plt.xlabel('预测值')
+    
+    if multi_class:
+        labels = ['大跌', '小跌', '小涨', '大涨']
+        plt.xticks(np.arange(4) + 0.5, labels)
+        plt.yticks(np.arange(4) + 0.5, labels)
+    
+    plt.show()
+
+def plot_feature_importance(model, features, title):
+    """绘制特征重要性"""
+    importance = model.feature_importances_
+    feat_importance = pd.DataFrame({
+        'feature': features,
+        'importance': importance
+    }).sort_values('importance', ascending=False)
+    
+    plt.figure(figsize=(10, 6))
+    sns.barplot(x='importance', y='feature', data=feat_importance)
+    plt.title(f'{title}特征重要性')
+    plt.show()
+
+def analyze_confidence(model, X_test, y_test, model_name):
+    """分析模型预测置信度"""
+    if hasattr(model, 'predict_proba'):
+        proba = model.predict_proba(X_test)
+        confidence = np.max(proba, axis=1)
+        
+        # 置信度分布
+        plt.figure(figsize=(12, 5))
+        plt.hist(confidence, bins=50, alpha=0.7)
+        plt.title(f'{model_name}预测置信度分布')
+        plt.xlabel('置信度')
+        plt.ylabel('频数')
+        plt.show()
+        
+        # 置信度-准确率曲线
+        thresholds = np.linspace(0, 1, 20)
+        accuracies = []
+        coverages = []
+        
+        for threshold in thresholds:
+            mask = confidence >= threshold
+            if sum(mask) > 0:
+                acc = accuracy_score(y_test[mask], model.predict(X_test[mask]))
+                coverage = sum(mask) / len(mask)
+                accuracies.append(acc)
+                coverages.append(coverage)
+        
+        plt.figure(figsize=(10, 5))
+        plt.plot(thresholds, accuracies, label='准确率')
+        plt.plot(thresholds, coverages, label='覆盖率')
+        plt.xlabel('置信度阈值')
+        plt.ylabel('分数')
+        plt.title(f'{model_name}置信度-准确率关系')
+        plt.legend()
+        plt.show()
+
+# 6. 模型优化方法
+def apply_class_weight(X_train, y_train, X_test, y_test):
+    """应用类别权重优化模型"""
+    class_weights = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+    weight_dict = dict(zip(np.unique(y_train), class_weights))
+    print("\n类别权重:", weight_dict)
+    
+    weighted_models = {
+        '加权决策树': DecisionTreeClassifier(class_weight=weight_dict, random_state=42),
+        '加权随机森林': RandomForestClassifier(class_weight=weight_dict, random_state=42),
+        '加权XGBoost': XGBClassifier(scale_pos_weight=class_weights[1]/class_weights[0], random_state=42)
+    }
+    
+    predictions = {}
+    for name, model in weighted_models.items():
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        predictions[name] = y_pred
+        
+        print(f"\n{name}模型评估报告：")
+        print(classification_report(y_test, y_pred))
+        
+    return weighted_models, predictions
+
+def apply_smote_tomek(X_train, y_train, X_test, y_test):
+    """应用SMOTETomek处理不平衡数据"""
+    smote_tomek = SMOTETomek(random_state=42)
+    X_train_balanced, y_train_balanced = smote_tomek.fit_resample(X_train, y_train)
+    
+    print("\n重采样后的类别分布：")
+    print(pd.Series(y_train_balanced).value_counts())
+    
+    # 可视化类别分布变化
+    plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
+    plt.pie([sum(y_train==0), sum(y_train==1)], labels=['下跌', '上涨'], autopct='%1.1f%%')
+    plt.title('原始训练集分布')
+    plt.subplot(1, 2, 2)
+    plt.pie([sum(y_train_balanced==0), sum(y_train_balanced==1)], 
+            labels=['下跌', '上涨'], autopct='%1.1f%%')
+    plt.title('SMOTETomek后的分布')
+    plt.tight_layout()
+    plt.show()
+    
+    # 使用平衡数据训练模型
+    models = {
+        'SMOTETomek_决策树': DecisionTreeClassifier(random_state=42),
+        'SMOTETomek_随机森林': RandomForestClassifier(random_state=42),
+        'SMOTETomek_XGBoost': XGBClassifier(random_state=42)
+    }
+    
+    predictions = {}
+    for name, model in models.items():
+        model.fit(X_train_balanced, y_train_balanced)
+        y_pred = model.predict(X_test)
+        predictions[name] = y_pred
+        
+        print(f"\n{name}模型评估报告：")
+        print(classification_report(y_test, y_pred))
+    
+    return models, predictions
+
+def apply_ensemble_learning(X_train, y_train, X_test, y_test):
+    """应用集成学习方法"""
+    estimators = [
+        ('rf', RandomForestClassifier(random_state=42)),
+        ('xgb', XGBClassifier(random_state=42)),
+        ('dt', DecisionTreeClassifier(random_state=42))
+    ]
+    
+    # 软投票分类器
+    voting_soft = VotingClassifier(estimators=estimators, voting='soft')
+    voting_soft.fit(X_train, y_train)
+    y_pred_voting = voting_soft.predict(X_test)
+    
+    print("\n集成学习模型评估报告：")
+    print(classification_report(y_test, y_pred_voting))
+    
+    return voting_soft, y_pred_voting
+
+# 7. 主函数
+def main():
+    # 1. 加载数据
+    df, features = load_and_preprocess_data('crypto_data.csv')
+    
+    # 2. 数据分割与标准化
+    (X_train, X_test, y_train, y_test, 
+     X_train_multi, X_test_multi, y_train_multi, y_test_multi,
+     X_train_scaled, X_test_scaled) = split_and_scale_data(df, features)
+    
+    # 3. 训练二分类模型
+    print("\n=== 二分类模型训练 ===")
+    binary_models, binary_preds = train_and_evaluate_models(
+        X_train, X_test, y_train, y_test, scaled=True)
+    
+    # 可视化二分类结果
+    for name, y_pred in binary_preds.items():
+        plot_confusion_matrix(y_test, y_pred, f'{name}混淆矩阵')
+    
+    # 4. 训练四分类模型
+    print("\n=== 四分类模型训练 ===")
+    multi_models, multi_preds = train_and_evaluate_models(
+        X_train_multi, X_test_multi, y_train_multi, y_test_multi)
+    
+    # 可视化四分类结果
+    for name, y_pred in multi_preds.items():
+        plot_confusion_matrix(y_test_multi, y_pred, f'{name}混淆矩阵', multi_class=True)
+    
+    # 5. 特征重要性分析
+    plot_feature_importance(binary_models['XGBoost'], features, 'XGBoost')
+    plot_feature_importance(multi_models['四分类XGBoost'], features, '四分类XGBoost')
+    
+    # 6. 置信度分析
+    analyze_confidence(binary_models['决策树'], X_test, y_test, '决策树')
+    analyze_confidence(binary_models['随机森林'], X_test, y_test, '随机森林')
+    
+    # 7. 模型优化
+    print("\n=== 类别权重优化 ===")
+    weighted_models, weighted_preds = apply_class_weight(X_train, y_train, X_test, y_test)
+    
+    print("\n=== SMOTETomek优化 ===")
+    smote_models, smote_preds = apply_smote_tomek(X_train, y_train, X_test, y_test)
+    
+    print("\n=== 集成学习优化 ===")
+    voting_soft, y_pred_voting = apply_ensemble_learning(X_train, y_train, X_test, y_test)
+    
+    # 8. 模型性能比较
+    print("\n=== 模型性能比较 ===")
+    all_models = {
+        '基础决策树': binary_preds['决策树'],
+        '加权随机森林': weighted_preds['加权随机森林'],
+        'SMOTETomek_XGBoost': smote_preds['SMOTETomek_XGBoost'],
+        '集成学习': y_pred_voting
+    }
+    
+    accuracies = []
+    f1_scores = []
+    names = []
+    for name, y_pred in all_models.items():
+        report = classification_report(y_test, y_pred, output_dict=True)
+        accuracies.append(report['accuracy'])
+        f1_scores.append(report['macro avg']['f1-score'])
+        names.append(name)
+    
+    plt.figure(figsize=(12, 5))
+    x = np.arange(len(names))
+    width = 0.35
+    plt.bar(x - width/2, accuracies, width, label='准确率')
+    plt.bar(x + width/2, f1_scores, width, label='F1分数')
+    plt.xticks(x, names, rotation=45)
+    plt.ylabel('分数')
+    plt.title('各模型性能对比')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
